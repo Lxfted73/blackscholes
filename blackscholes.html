@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Black-Scholes surface</title>
+<style>
+  :root {
+    --paper: #12141a;
+    --ink: #f4efe6;
+    --muted: #b7b1a6;
+    --panel: #1c2030;
+    --accent: #e0a45a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font: 15px/1.4 "Segoe UI", Helvetica, Arial, sans-serif;
+  }
+  main { max-width: 1100px; margin: 0 auto; padding: 16px 14px 32px; }
+  h1 { font-size: 1.25rem; font-weight: 600; margin: 0 0 4px; }
+  .lede { color: var(--muted); margin: 0 0 14px; font-size: 0.92rem; }
+  .controls { display: grid; grid-template-columns: 1fr; gap: 10px; margin-bottom: 14px; }
+  @media (min-width: 800px) {
+    .controls { grid-template-columns: 1fr 1fr; }
+  }
+  label.row {
+    display: grid;
+    grid-template-columns: 7.2rem 1fr 6.2rem;
+    gap: 8px;
+    align-items: center;
+    background: var(--panel);
+    border-radius: 10px;
+    padding: 8px 10px;
+  }
+  label.row span { font-size: 0.88rem; }
+  input[type="range"] { width: 100%; accent-color: var(--accent); }
+  input[type="number"] {
+    width: 100%;
+    background: #f7f3ea;
+    color: #141414;
+    border: 0;
+    border-radius: 6px;
+    padding: 8px 6px;
+    font: inherit;
+    text-align: right;
+  }
+  .scroll {
+    overflow-x: auto;
+    border-radius: 12px;
+    background: #0e1016;
+    padding: 8px;
+    -webkit-overflow-scrolling: touch;
+  }
+  table { border-collapse: separate; border-spacing: 2px; }
+  th, td {
+    text-align: center;
+    font-variant-numeric: tabular-nums;
+    font-size: 11px;
+    padding: 7px 2px;
+    min-width: 48px;
+  }
+  th { font-weight: 500; }
+  td { border-radius: 3px; }
+  .summary { margin-top: 12px; font-size: 0.92rem; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Price by strike and expiration</h1>
+  <p class="lede">Puts left of spot, calls at and above spot. Type a value or drag the slider. This file runs by itself in the browser.</p>
+  <div class="controls" id="controls"></div>
+  <div class="scroll"><table id="grid"></table></div>
+  <p class="summary" id="summary"></p>
+</main>
+<script>
+const STRIKES = [];
+for (let k = 60; k <= 150; k += 5) STRIKES.push(k);
+const EXPS = [
+  ["7D", 7 / 365],
+  ["30D", 30 / 365],
+  ["60D", 60 / 365],
+  ["90D", 90 / 365],
+  ["180D", 180 / 365],
+  ["1Y", 1],
+];
+const FIELDS = [
+  { key: "spot", label: "Spot", min: 20, max: 400, step: 0.5, value: 100, digits: 2 },
+  { key: "rate", label: "Rate", min: 0, max: 0.2, step: 0.001, value: 0.04, digits: 4 },
+  { key: "iv", label: "ATM IV", min: 0.01, max: 2, step: 0.01, value: 0.3, digits: 4 },
+  { key: "skew", label: "Skew / 10% OTM", min: 0, max: 2, step: 0.01, value: 0.4, digits: 4 },
+];
+
+function normCdf(x) {
+  const a1 = 0.254829592, a2 = -0.284496736, a3 = 1.421413741;
+  const a4 = -1.453152027, a5 = 1.061405429, p = 0.3275911;
+  const sign = x < 0 ? -1 : 1;
+  const z = Math.abs(x) / Math.SQRT2;
+  const t = 1 / (1 + p * z);
+  const erf = 1 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * Math.exp(-z * z);
+  return 0.5 * (1 + sign * erf);
+}
+
+function bs(S, K, T, r, sigma, kind) {
+  if (T <= 0 || sigma <= 0) return Math.max(kind === "call" ? S - K : K - S, 0);
+  const vol = sigma * Math.sqrt(T);
+  const d1 = (Math.log(S / K) + (r + 0.5 * sigma * sigma) * T) / vol;
+  const d2 = d1 - vol;
+  const df = Math.exp(-r * T);
+  if (kind === "call") return S * normCdf(d1) - K * df * normCdf(d2);
+  return K * df * normCdf(-d2) - S * normCdf(-d1);
+}
+
+function callDelta(S, K, T, r, sigma) {
+  if (T <= 0 || sigma <= 0) return S > K ? 1 : 0;
+  const d1 = (Math.log(S / K) + (r + 0.5 * sigma * sigma) * T) / (sigma * Math.sqrt(T));
+  return normCdf(d1);
+}
+
+function strikeIv(K, S, base, skew) {
+  const m = Math.log(K / S);
+  return Math.min(base + Math.max(-m, 0) * skew / 0.10, 1.5);
+}
+
+function priceColor(t) {
+  const stops = [
+    [0, [10, 8, 28]],
+    [0.25, [48, 28, 92]],
+    [0.5, [32, 92, 140]],
+    [0.75, [32, 168, 154]],
+    [1, [236, 244, 214]],
+  ];
+  let i = 0;
+  while (i < stops.length - 2 && t > stops[i + 1][0]) i++;
+  const [t0, c0] = stops[i];
+  const [t1, c1] = stops[i + 1];
+  const u = (t - t0) / (t1 - t0 || 1);
+  return c0.map((c, k) => Math.round(c + (c1[k] - c) * u));
+}
+
+const state = Object.fromEntries(FIELDS.map((f) => [f.key, f.value]));
+const controls = document.getElementById("controls");
+
+FIELDS.forEach((f) => {
+  const label = document.createElement("label");
+  label.className = "row";
+  const name = document.createElement("span");
+  name.textContent = f.label;
+  const range = document.createElement("input");
+  range.type = "range";
+  range.min = f.min;
+  range.max = f.max;
+  range.step = f.step;
+  range.value = f.value;
+  const box = document.createElement("input");
+  box.type = "number";
+  box.step = f.step;
+  box.value = f.value.toFixed(f.digits);
+  function setBoth(raw) {
+    const val = Number(raw);
+    if (!Number.isFinite(val)) {
+      box.value = state[f.key].toFixed(f.digits);
+      return;
+    }
+    state[f.key] = val;
+    if (val < Number(range.min)) range.min = val;
+    if (val > Number(range.max)) range.max = val;
+    range.value = val;
+    box.value = val.toFixed(f.digits);
+    render();
+  }
+  range.addEventListener("input", () => setBoth(range.value));
+  box.addEventListener("change", () => setBoth(box.value));
+  label.append(name, range, box);
+  controls.append(label);
+});
+
+function render() {
+  const S = state.spot, r = state.rate, base = state.iv, skew = state.skew;
+  const grid = EXPS.map(([, T]) => STRIKES.map((K) => {
+    const iv = strikeIv(K, S, base, skew);
+    return bs(S, K, T, r, iv, K < S ? "put" : "call");
+  }));
+  let lo = Infinity, hi = -Infinity;
+  grid.flat().forEach((v) => { lo = Math.min(lo, v); hi = Math.max(hi, v); });
+  const span = hi - lo || 1;
+  const head = "<tr><th></th>" + STRIKES.map((k) => `<th>${k}</th>`).join("") + "</tr>";
+  const body = EXPS.map(([label], i) => {
+    const cells = grid[i].map((v) => {
+      const [R, G, B] = priceColor((v - lo) / span);
+      const lum = (0.2126 * R + 0.7152 * G + 0.0722 * B) / 255;
+      const fg = lum > 0.62 ? "#141414" : "#f4efe6";
+      return `<td style="background:rgb(${R},${G},${B});color:${fg}">${v.toFixed(2)}</td>`;
+    }).join("");
+    return `<tr><th>${label}</th>${cells}</tr>`;
+  }).join("");
+  document.getElementById("grid").innerHTML = head + body;
+
+  const atm = bs(S, S, 30 / 365, r, base, "call");
+  const delta = callDelta(S, S, 30 / 365, r, base);
+  const wing = strikeIv(60, S, base, skew);
+  document.getElementById("summary").textContent =
+    `ATM 30D call ${atm.toFixed(2)}  ·  delta ${delta.toFixed(2)}  ·  IV ${(base * 100).toFixed(0)}%` +
+    `    ·    60-strike IV ${(wing * 100).toFixed(1)}%`;
+}
+
+render();
+</script>
+</body>
+</html>
